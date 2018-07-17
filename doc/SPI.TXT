@@ -1,0 +1,191 @@
+
+1. SPI裸板程序
+1.1 用GPIO模拟SPI
+1.2 用S3C2440的SPI控制器
+
+2.SPI驱动框架
+2.1 枚举过程
+drivers/spi/spi.c:
+    spi_register_board_info
+        /* 对于每一个spi_master,调用spi_match_master_to_boardinfo */
+        list_for_each_entry(master, &spi_master_list, list)
+            spi_match_master_to_boardinfo
+            /* board_info里含有bus_num, 如果某个spi_master的bus_num跟它一样
+             * 则创建一个新的spi_device
+             */
+                    if (master->bus_num == bi->busnum)
+                        spi_new_device
+                            spi_alloc_device
+                            /* 记录bi信息, 比如片选，MODE，MAX HZ */    
+                            spi_add_device /* 根据名字找到spi_driver, 调用它的probe函数 */
+                                spi_setup(spi);
+                                device_add  /* 会绑定到一个spi_driver */
+
+2.2 数据收发过程
+    spi_write
+        spi_message_init(&m);
+        初始化一个spi_message  /* 一个不可打断的SPI传输过程: cs=0,传数据,cs=1 */
+                               /* 一个spi_message由多个spi_transfer组成 */
+        spi_message_add_tail(&t, &m);  /* spi_transfe是SPI上传输的单方向1个或多个字节 */
+        spi_sync(spi, &m);  /* 启动传输并等待完成 */
+    
+2.3 spi_driver如何调用spi_controller
+    spi_sync
+        __spi_sync(spi, message, 0);
+            spi_async_locked
+                __spi_async
+                    master->transfer(spi, message);
+            wait_for_completion
+
+3.实例：SPI OLED驱动
+3.1 准备工作
+sudo tar xjf arm-linux-gcc-4.3.2.tar.bz2 -C /
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/arm/4.3.2/bin
+tar xjf linux-3.4.2.tar.bz2 
+cd  linux-3.4.2
+patch -p1 < ../linux-3.4.2_camera_jz2440.patch
+cp config_ok .config
+make uImage
+
+sudo tar xjf fs_mini_mdev_new.tar.bz2 -C /work/nfs_root
+
+3.2 写代码
+a. 构造注册spi_board_info
+b. 构造注册spi_driver
+c. 检查代码，特别是spi_master: drivers\spi\spi-s3c24xx.c
+c.1 它注册了名为"s3c2410-spi"的platform_driver
+    需要有同名的platform_device
+    修改arch\arm\mach-s3c24xx\mach-smdk2440.c
+static struct platform_device *smdk2440_devices[] __initdata = {
+	&s3c_device_ohci,
+	&s3c_device_lcd,
+	&s3c_device_wdt,
+	&s3c_device_i2c0,
+	&s3c_device_iis,
++	&s3c_device_spi0,
++	&s3c_device_spi1,
+};
+
+c.2 给platform_dev添加platform_data
+   arch\arm\plat-samsung\devs.c
+
+d. 编译安装驱动
+d.1 配置内核使用主控驱动 spi-s3c24xx.c
+-> General setup 
+     [*] Prompt for development and/or incomplete code/drivers
+
+-> Device Drivers
+   -> SPI support
+        <*>   Samsung S3C24XX series SPI        
+
+make uImage        
+cp arch/arm/boot/uImage /work/nfs_root
+
+uboot:
+set 'bootcmd nfs 30000000 192.168.1.124:/work/nfs_root/uImage ; bootm 30000000'
+set bootargs console=ttySAC0,115200 root=/dev/nfs nfsroot=192.168.1.124:/work/nfs_root/fs_mini_mdev_new ip=192.168.1.17
+save
+boot
+
+注意：spi_register_board_info没有被EXPORT_SYMBOL，所以：
+      spi_info_jz2440.c只能被编进内核，而无法作为模块使用
+ cp spi_info_jz2440.c /work/system/linux-3.4.2/drivers/spi/
+ 修改drivers/spi/Makefile,添加这行：
+ obj-$(CONFIG_SPI_S3C24XX) += spi_info_jz2440.o
+
+d.2 编译驱动
+d.3 insmod
+
+e. 写测试程序
+
+
+4.实例：SPI FLASH驱动（字符设备、块设备）
+
+
+5.SPI控制器驱动
+
+测试
+a. 去掉内核自带的spi_master驱动
+修改 drivers/spi/Makefile:
+#obj-$(CONFIG_SPI_S3C24XX)              += spi-s3c24xx-hw.o
+#spi-s3c24xx-hw-y                       := spi-s3c24xx.o
+#spi-s3c24xx-hw-$(CONFIG_SPI_S3C24XX_FIQ) += spi-s3c24xx-fiq.o
+
+b. 编译spi_s3c2440.c
+
+c. 
+insmod spi_s3c2440.ko
+insmod spi_oled_drv.ko
+insmod spi_flash_drv.ko
+
+/oled_test init
+/oled_test 0 0 100ask.taobao.com
+
+mkfs.vfat /dev/mtdblock4
+mount -t vfat /dev/mtdblock4 /mnt
+
+
+
+
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/arm/4.3.2/bin
+
+
+
+
+
+
+
+
+http://www.cnblogs.com/liugf05/archive/2012/12/03/2800457.html
+
+
+struct spi_master	*master;
+		int			(*setup)(struct spi_device *spi);
+		int			(*transfer)(struct spi_device *spi,
+							struct spi_message *mesg);
+		/* called on release() to free memory provided by spi_master */
+		void			(*cleanup)(struct spi_device *spi);
+
+
+spi_bitbang
+		setup_transfer
+		txrx_bufs		
+
+
+spi_bitbang_start
+		spi_register_master
+
+boardinfo		
+
+
+spi_register_driver
+
+spi_register_board_info
+	spi_match_master_to_boardinfo
+		spi_new_device(master, bi);
+			spi_alloc_device
+
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/arm/4.3.2/bin
+
+set 'bootcmd nfs 30000000 192.168.1.124:/work/nfs_root/uImage ; bootm 30000000'
+set bootargs console=ttySAC0,115200 root=/dev/nfs nfsroot=192.168.1.124:/work/nfs_root/fs_mini_mdev_new ip=192.168.1.17
+
+1. 配置内核
+drivers\spi\spi-s3c24xx.c : platform_driver, "s3c2410-spi"
+arch\arm\plat-samsung\devs.c, "s3c2410-spi"
+       构造一个 s3c2410_spi_info ，实现 set_cs
+
+arch\arm\mach-s3c24xx\mach-smdk2440.c : 在static struct platform_device *smdk2440_devices[] __initdata = {
+                         中加入：
+                         static struct platform_device *smdk2440_devices[] __initdata = {
+
+															&s3c_device_spi0,
+															&s3c_device_spi1,
+														};
+
+       
+       
+       
+
